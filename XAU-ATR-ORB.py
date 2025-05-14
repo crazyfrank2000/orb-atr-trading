@@ -701,6 +701,13 @@ def print_daily_report():
 
     # 准备当前交易数据
     current_trades_df = pd.DataFrame(trades_record)
+    
+    # Round PnL and PnLPercent columns to 2 decimal places if they exist
+    if 'PnL' in current_trades_df.columns:
+        current_trades_df['PnL'] = current_trades_df['PnL'].round(2)
+    if 'PnLPercent' in current_trades_df.columns:
+        current_trades_df['PnLPercent'] = current_trades_df['PnLPercent'].round(2)
+    
     total_current_trades = len(current_trades_df)
     
     # 确保reports文件夹存在
@@ -720,6 +727,12 @@ def print_daily_report():
             existing_trades_df = pd.read_csv(csv_filename)
             logger.info(f"找到现有交易记录，包含 {len(existing_trades_df)} 笔交易")
             
+            # Ensure PnL and PnLPercent in existing trades are rounded to 2 decimal places
+            if 'PnL' in existing_trades_df.columns:
+                existing_trades_df['PnL'] = existing_trades_df['PnL'].round(2)
+            if 'PnLPercent' in existing_trades_df.columns:
+                existing_trades_df['PnLPercent'] = existing_trades_df['PnLPercent'].round(2)
+                
             # 检查是否有重复项
             if 'Time' in existing_trades_df.columns and 'Time' in current_trades_df.columns:
                 # 基于交易时间和入场价格检查重复
@@ -887,7 +900,7 @@ def monitor_trade_and_exit(action, quantity, entry_price, stop_price, max_durati
                     profit_loss = (entry_price - exit_price) * quantity
                     profit_percent = ((entry_price - exit_price) / entry_price) * 100
                 
-                result = "盈利" if profit_loss > 0 else "亏损" if profit_loss < 0 else "持平"
+                result = "Profit" if profit_loss > 0 else "Loss" if profit_loss < 0 else "Breakeven"
                 logger.info(f"交易结束 | 止损触发 | {action} {quantity} | 持仓: {duration_str}")
                 logger.info(f"入场: ${entry_price:.2f} → 出场: ${exit_price:.2f} | P/L: ${profit_loss:.2f} ({profit_percent:.2f}%) | 结果: {result}")
                 
@@ -895,16 +908,16 @@ def monitor_trade_and_exit(action, quantity, entry_price, stop_price, max_durati
                 for trade in trades_record:
                     if 'EntryPrice' in trade and abs(trade['EntryPrice'] - entry_price) < 0.1:
                         trade['ExitPrice'] = exit_price
-                        trade['PnL'] = profit_loss
-                        trade['PnLPercent'] = profit_percent
+                        trade['PnL'] = round(profit_loss, 2)
+                        trade['PnLPercent'] = round(profit_percent, 2)
                         trade['Duration'] = duration_str
                         trade['Result'] = result
                         trade['ExitTime'] = trade_end_time.strftime('%Y-%m-%d %H:%M:%S')
-                        trade['ExitReason'] = "止损触发"
+                        trade['ExitReason'] = "Stop Loss Triggered"
                         break
                 
                 # 打印交易表格
-                print_trade_table(action, entry_price, exit_price, quantity, profit_loss, profit_percent, duration_str, "止损触发")
+                print_trade_table(action, entry_price, exit_price, quantity, profit_loss, profit_percent, duration_str, "Stop Loss Triggered")
                 break
             
             # 更新持仓状态 (每1分钟更新一次)
@@ -1026,7 +1039,8 @@ def close_position_at_market(action, quantity, entry_price, start_time):
                 profit_loss = (entry_price - exit_price) * quantity
                 profit_percent = ((entry_price - exit_price) / entry_price) * 100
             
-            result = "盈利" if profit_loss > 0 else "亏损" if profit_loss < 0 else "持平"
+            result = "Profit" if profit_loss > 0 else "Loss" if profit_loss < 0 else "Breakeven"
+            exit_reason = "Market Close" if exit_reason == "收盘前平仓" else "Max Duration Reached"
             
             # 简化日志输出
             logger.info(f"交易结束 | {action} {quantity} | 持仓时间: {duration_str} | 结果: {result}")
@@ -1036,8 +1050,8 @@ def close_position_at_market(action, quantity, entry_price, start_time):
             for trade in trades_record:
                 if 'EntryPrice' in trade and abs(trade['EntryPrice'] - entry_price) < 0.1:
                     trade['ExitPrice'] = exit_price
-                    trade['PnL'] = profit_loss
-                    trade['PnLPercent'] = profit_percent
+                    trade['PnL'] = round(profit_loss, 2)
+                    trade['PnLPercent'] = round(profit_percent, 2)
                     trade['Duration'] = duration_str
                     trade['Result'] = result
                     trade['ExitTime'] = trade_end_time.strftime('%Y-%m-%d %H:%M:%S')

@@ -630,6 +630,13 @@ def print_daily_report():
 
     # 准备当前交易数据
     current_trades_df = pd.DataFrame(trades_record)
+    
+    # Round PnL and PnLPercent columns to 2 decimal places if they exist
+    if 'PnL' in current_trades_df.columns:
+        current_trades_df['PnL'] = current_trades_df['PnL'].round(2)
+    if 'PnLPercent' in current_trades_df.columns:
+        current_trades_df['PnLPercent'] = current_trades_df['PnLPercent'].round(2)
+    
     total_current_trades = len(current_trades_df)
     
     # 确保reports文件夹存在
@@ -649,6 +656,12 @@ def print_daily_report():
             existing_trades_df = pd.read_csv(csv_filename)
             logger.info(f"找到现有交易记录，包含 {len(existing_trades_df)} 笔交易")
             
+            # Ensure PnL and PnLPercent in existing trades are rounded to 2 decimal places
+            if 'PnL' in existing_trades_df.columns:
+                existing_trades_df['PnL'] = existing_trades_df['PnL'].round(2)
+            if 'PnLPercent' in existing_trades_df.columns:
+                existing_trades_df['PnLPercent'] = existing_trades_df['PnLPercent'].round(2)
+                
             # 检查是否有重复项
             if 'Time' in existing_trades_df.columns and 'Time' in current_trades_df.columns:
                 # 基于交易时间和入场价格检查重复
@@ -871,8 +884,8 @@ def close_position_at_market(action, quantity, entry_price, start_time):
                 profit_loss = (entry_price - exit_price) * quantity
                 profit_percent = ((entry_price - exit_price) / entry_price) * 100
             
-            result = "盈利" if profit_loss > 0 else "亏损" if profit_loss < 0 else "持平"
-            exit_reason = "收盘前平仓" if is_near_close else "到达最大持仓时间"
+            result = "Profit" if profit_loss > 0 else "Loss" if profit_loss < 0 else "Breakeven"
+            exit_reason = "Market Close" if is_near_close else "Max Duration Reached"
             
             logger.info(f"\n===== 交易总结 =====")
             logger.info(f"交易方向: {action}")
@@ -889,8 +902,8 @@ def close_position_at_market(action, quantity, entry_price, start_time):
             for trade in trades_record:
                 if 'EntryPrice' in trade and abs(trade['EntryPrice'] - entry_price) < 0.1:
                     trade['ExitPrice'] = exit_price
-                    trade['PnL'] = profit_loss
-                    trade['PnLPercent'] = profit_percent
+                    trade['PnL'] = round(profit_loss, 2)
+                    trade['PnLPercent'] = round(profit_percent, 2)
                     trade['Duration'] = duration_str
                     trade['Result'] = result
                     trade['ExitTime'] = trade_end_time.strftime('%Y-%m-%d %H:%M:%S')
@@ -918,6 +931,10 @@ def print_trade_summary():
     logger.info("\n" + "="*50)
     logger.info("本次运行交易详细总结")
     logger.info("="*50)
+    
+    total_trades = 0
+    total_pnl = 0
+    winning_trades = 0
     
     for i, trade in enumerate(trades_record, 1):
         # 提取交易信息
@@ -952,6 +969,15 @@ def print_trade_summary():
             logger.info(f"  盈亏金额: ${pnl:.2f} ({pnl_percent:.2f}%)")
             logger.info(f"  交易结果: {result}")
             logger.info(f"  出场原因: {exit_reason}")
+            
+            # 计算统计数据
+            total_trades += 1
+            total_pnl += pnl
+            if pnl > 0:
+                winning_trades += 1
+            
+            # 简化输出为单行
+            logger.info(f"{direction} {quantity} | ${entry_price:.2f} → ${exit_price:.2f} | P/L: ${pnl:.2f} ({pnl_percent:.2f}%) | {exit_reason}")
         else:
             # 计算未实现盈亏 (如果可能)
             try:
@@ -978,7 +1004,11 @@ def print_trade_summary():
         # 在交易记录之间添加分隔符
         logger.info("-"*40)
     
-    logger.info("="*50)
+    # 打印汇总信息
+    win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
+    logger.info("-"*50)
+    logger.info(f"总计: {total_trades}笔交易 | 胜率: {win_rate:.1f}% | 总盈亏: ${total_pnl:.2f}")
+    logger.info("-"*50)
 
 # 主逻辑
 try:
