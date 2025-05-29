@@ -1,0 +1,2 @@
+Time,Direction,EntryPrice,Quantity,StopLoss,PnL,PnLPercent,Symbol,AccBefore,AccAfter,Duration,Result,ExitTime,ExitReason,ExitPrice
+2025-05-29 10:55:05,BUY,71.24,1246,71.04,-249.2,-0.28,TQQQ,25000,24750.8,0小时13分钟8秒,Loss,2025-05-29 11:08:17,Stop Loss Triggered,71.04

@@ -22,25 +22,54 @@ if not os.path.exists(logs_dir):
     os.makedirs(logs_dir)
     print(f"Created logs directory: {logs_dir}")
 
-# 初始化日志
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(message)s',
-    handlers=[
-        logging.FileHandler(os.path.join(logs_dir, "xau_atr_trading.log")),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger('ORB_ATR_XAU')
-
-# 设置ib_insync日志级别为WARNING，减少冗余输出
-util.logToConsole(logging.WARNING)
-
 # Read configuration
 config = configparser.ConfigParser()
 config.read('config.ini')
 
 trade_symbol = config.get('Trading', 'symbol', fallback='XAUUSD')
+
+# 初始化日志 - 使用配置中的标的名称
+log_filename = f"{trade_symbol.lower()}_atr_trading.log"
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(message)s',
+    handlers=[
+        logging.FileHandler(os.path.join(logs_dir, log_filename)),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger('ORB_ATR_TRADING')
+
+# 设置ib_insync日志级别为WARNING，减少冗余输出
+util.logToConsole(logging.WARNING)
+
+# Function to update account balance in config.ini
+def update_account_balance_in_config(new_balance):
+    try:
+        config_writer = configparser.ConfigParser()
+        # Preserve case for keys if necessary (though 'account' is lowercase)
+        # config_writer.optionxform = str 
+        config_writer.read('config.ini')
+
+        if not config_writer.has_section('Trading'):
+            config_writer.add_section('Trading')
+        
+        rounded_balance = int(round(new_balance))
+        config_writer.set('Trading', 'account', str(rounded_balance))
+        
+        with open('config.ini', 'w') as configfile:
+            config_writer.write(configfile)
+        logger.info(f"Updated account balance in config.ini to: {rounded_balance}")
+        
+        # Optionally update global ACCOUNT_SIZE if script were to run multiple trades in one session
+        # global ACCOUNT_SIZE
+        # ACCOUNT_SIZE = rounded_balance
+    except Exception as e:
+        logger.error(f"Failed to update account balance in config.ini: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+
+# Continue reading other configurations
 trade_sec_type = config.get('Trading', 'secType', fallback='CMDTY')
 trade_exchange = config.get('Trading', 'exchange', fallback='SMART')
 trade_currency = config.get('Trading', 'currency', fallback='USD')
@@ -62,6 +91,9 @@ else:
     trade_exit_strategy = 'EOD' # Fallback to EOD
 
 trade_max_hold_duration_minutes = config.getint('Trading', 'maxHoldDurationMinutes', fallback=60)
+
+# Add new config value for ATR multiplier
+ATR_multiplier = config.getfloat('Trading', 'ATR_multiplier', fallback=0.05)
 
 # 连接到IBKR
 ib = IB()
@@ -226,7 +258,7 @@ for i in range(10, 0, -1):
     logger.info(f"{i}...")
     time.sleep(1)
 
-ACCOUNT_SIZE = 25000
+ACCOUNT_SIZE = config.getint('Trading', 'account', fallback=25000) # This is now our primary, mutable tracking variable
 LEVERAGE = 4
 RISK_PCT = 0.01
 
@@ -806,14 +838,32 @@ def print_daily_report():
         logger.info("No trades executed today")
         return
 
+    # Define the desired column order for the CSV report
+    csv_column_order = [
+        'Time', 'Direction', 'EntryPrice', 'Quantity', 'StopLoss', 
+        'PnL', 'PnLPercent', 'Symbol', 'AccBefore', 'AccAfter', 
+        'Duration', 'Result', 'ExitTime', 'ExitReason', 'ExitPrice'
+    ]
+
     # 准备当前交易数据
     current_trades_df = pd.DataFrame(trades_record)
     
-    # Round PnL and PnLPercent columns to 2 decimal places if they exist
-    if 'PnL' in current_trades_df.columns:
-        current_trades_df['PnL'] = current_trades_df['PnL'].round(2)
-    if 'PnLPercent' in current_trades_df.columns:
-        current_trades_df['PnLPercent'] = current_trades_df['PnLPercent'].round(2)
+    # Ensure all desired columns exist in current_trades_df, add if missing
+    for col in csv_column_order:
+        if col not in current_trades_df.columns:
+            current_trades_df[col] = pd.NA # Use pd.NA for missing values
+
+    # Reorder current_trades_df according to csv_column_order
+    if not current_trades_df.empty:
+        current_trades_df = current_trades_df[csv_column_order]
+    else: # Handle case where current_trades_df is empty but we want a header
+        current_trades_df = pd.DataFrame(columns=csv_column_order)
+
+    # Round specified numeric columns to 2 decimal places if they exist
+    cols_to_round = ['PnL', 'PnLPercent', 'AccBefore', 'AccAfter', 'EntryPrice', 'ExitPrice', 'StopLoss']
+    for col_name in cols_to_round:
+        if col_name in current_trades_df.columns:
+            current_trades_df[col_name] = pd.to_numeric(current_trades_df[col_name], errors='coerce').round(2)
     
     total_current_trades = len(current_trades_df)
     
@@ -827,50 +877,68 @@ def print_daily_report():
     symbol_name = contract.symbol if hasattr(contract, 'symbol') else "UNKNOWN_SYMBOL"
     csv_filename = os.path.join(reports_dir, f'trades_{symbol_name}_history.csv')
     
-    # 检查文件是否已存在，如果存在则加载现有数据
-    all_trades_df = current_trades_df.copy()  # 默认情况下使用当前交易
+    all_trades_df = pd.DataFrame() # Initialize an empty DataFrame
+
     if os.path.exists(csv_filename):
         try:
             existing_trades_df = pd.read_csv(csv_filename)
             logger.info(f"找到现有交易记录，包含 {len(existing_trades_df)} 笔交易")
+
+            # Ensure all desired columns exist in existing_trades_df, add if missing
+            for col in csv_column_order:
+                if col not in existing_trades_df.columns:
+                    existing_trades_df[col] = pd.NA
+            if not existing_trades_df.empty:
+                 existing_trades_df = existing_trades_df[csv_column_order]
+
+
+            # Round numeric columns in existing data too
+            for col_name in cols_to_round:
+                if col_name in existing_trades_df.columns:
+                    existing_trades_df[col_name] = pd.to_numeric(existing_trades_df[col_name], errors='coerce').round(2)
             
-            # Ensure PnL and PnLPercent in existing trades are rounded to 2 decimal places
-            if 'PnL' in existing_trades_df.columns:
-                existing_trades_df['PnL'] = existing_trades_df['PnL'].round(2)
-            if 'PnLPercent' in existing_trades_df.columns:
-                existing_trades_df['PnLPercent'] = existing_trades_df['PnLPercent'].round(2)
-                
-            # 检查是否有重复项
-            if 'Time' in existing_trades_df.columns and 'Time' in current_trades_df.columns:
-                # 基于交易时间和入场价格检查重复
-                new_trades = []
-                for _, new_trade in current_trades_df.iterrows():
-                    # 检查此交易是否已存在于现有记录中
-                    duplicate = False
-                    for _, existing_trade in existing_trades_df.iterrows():
-                        if 'Time' in new_trade and 'Time' in existing_trade and 'EntryPrice' in new_trade and 'EntryPrice' in existing_trade:
-                            if new_trade['Time'] == existing_trade['Time'] and abs(float(new_trade['EntryPrice']) - float(existing_trade['EntryPrice'])) < 0.1:
-                                duplicate = True
-                                break
-                    
-                    if not duplicate:
-                        new_trades.append(new_trade)
-                
-                if new_trades:
-                    # 将新交易添加到现有交易
-                    new_trades_df = pd.DataFrame(new_trades)
-                    all_trades_df = pd.concat([existing_trades_df, new_trades_df], ignore_index=True)
-                    logger.info(f"添加了 {len(new_trades)} 笔新交易")
-                else:
-                    all_trades_df = existing_trades_df
-                    logger.info("没有找到新的交易记录需要添加")
-            else:
-                # 如果列名不匹配，直接合并
+            # Combine new trades with existing ones
+            # Identify truly new trades if current_trades_df is not empty
+            if not current_trades_df.empty:
+                # Simple concat for now, assuming Time and EntryPrice can largely identify uniqueness
+                # More robust deduplication might be needed if script runs multiple times with same trade data
                 all_trades_df = pd.concat([existing_trades_df, current_trades_df], ignore_index=True)
-                logger.info("合并了现有和新交易记录")
+                # Deduplicate based on key fields like Time, Symbol, EntryPrice to avoid re-adding identical trades
+                # This is a basic deduplication. Consider more robust checks if necessary.
+                if 'Time' in all_trades_df.columns and 'Symbol' in all_trades_df.columns and 'EntryPrice' in all_trades_df.columns:
+                    all_trades_df.drop_duplicates(subset=['Time', 'Symbol', 'EntryPrice', 'Direction'], keep='last', inplace=True)
+                logger.info(f"合并后总交易记录数: {len(all_trades_df)}")
+            else:
+                all_trades_df = existing_trades_df
+                
         except Exception as e:
-            logger.warning(f"读取现有交易记录失败: {e}，将只保存当前交易")
-    
+            logger.warning(f"读取或合并现有交易记录失败: {e}。将只处理当前交易（如果有）。")
+            if not current_trades_df.empty:
+                all_trades_df = current_trades_df
+            else: # If current_trades_df is also empty, create an empty df with correct columns
+                 all_trades_df = pd.DataFrame(columns=csv_column_order)
+    elif not current_trades_df.empty:
+        all_trades_df = current_trades_df
+        logger.info(f"没有找到现有交易记录文件。将使用当前 {len(all_trades_df)} 笔交易。")
+    else: # No existing file and no current trades
+        all_trades_df = pd.DataFrame(columns=csv_column_order)
+        logger.info("没有现有交易记录文件，也没有当前交易。将创建一个空的CSV（仅含表头）。")
+
+
+    # Final check on columns and rounding for all_trades_df
+    if not all_trades_df.empty:
+        for col in csv_column_order: # Ensure all columns are present
+            if col not in all_trades_df.columns:
+                all_trades_df[col] = pd.NA
+        all_trades_df = all_trades_df[csv_column_order] # Enforce order
+
+        for col_name in cols_to_round: # Apply rounding
+            if col_name in all_trades_df.columns:
+                 all_trades_df[col_name] = pd.to_numeric(all_trades_df[col_name], errors='coerce').round(2)
+    else: # If all_trades_df is still empty, ensure it has the correct columns for header output
+        all_trades_df = pd.DataFrame(columns=csv_column_order)
+
+
     # 计算汇总统计
     total_trades = len(all_trades_df)
     winning_trades = len(all_trades_df[all_trades_df['PnL'] > 0]) if 'PnL' in all_trades_df.columns else 0
@@ -912,10 +980,18 @@ def print_daily_report():
     # 保存所有交易记录
     all_trades_df.to_csv(csv_filename, index=False)
     logger.info(f"交易记录已保存至: {csv_filename}")
-    logger.info(f"包含 {total_trades} 笔交易记录")
+    logger.info(f"包含 {len(all_trades_df)} 笔交易记录")
+
+    # After saving report, update config with the iterated ACCOUNT_SIZE
+    global ACCOUNT_SIZE # Ensure we are using the global, iterated one
+    if isinstance(ACCOUNT_SIZE, (int, float)): # Check if ACCOUNT_SIZE is valid
+        logger.info(f"Attempting to update config.ini with final ACCOUNT_SIZE: {ACCOUNT_SIZE}")
+        update_account_balance_in_config(ACCOUNT_SIZE)
+    else:
+        logger.warning(f"Could not update config with ACCOUNT_SIZE as it's invalid: {ACCOUNT_SIZE}.")
 
 # 监控交易并处理平仓
-def monitor_trade_and_exit(action, quantity, entry_price, stop_price, config_exit_strategy, config_max_hold_duration_minutes):
+def monitor_trade_and_exit(action, quantity, entry_price, stop_price, config_exit_strategy, config_max_hold_duration_minutes, trade_entry_key_str):
     """
     监控已执行的交易，处理平仓
     
@@ -983,7 +1059,9 @@ def monitor_trade_and_exit(action, quantity, entry_price, stop_price, config_exi
                     exit_triggered_by_strategy = True
 
             if exit_triggered_by_strategy:
-                close_position_at_market(action, quantity, entry_price, start_time, exit_reason_for_strategy)
+                # Pass the original trade_entry_key_str for record lookup, 
+                # and 'start_time' (monitor's start) for duration calculation from monitor start.
+                close_position_at_market(action, quantity, entry_price, trade_entry_key_str, start_time, exit_reason_for_strategy)
                 is_position_closed = True
                 break
             
@@ -1021,16 +1099,35 @@ def monitor_trade_and_exit(action, quantity, entry_price, stop_price, config_exi
                 logger.info(f"交易结束 | 止损触发 | {action} {quantity} | 持仓: {duration_str}")
                 logger.info(f"入场: ${entry_price:.2f} → 出场: ${exit_price:.2f} | P/L: ${profit_loss:.2f} ({profit_percent:.2f}%) | 结果: {result}")
                 
-                # 更新交易记录
-                for trade in trades_record:
-                    if 'EntryPrice' in trade and abs(trade['EntryPrice'] - entry_price) < 0.1:
-                        trade['ExitPrice'] = exit_price
-                        trade['PnL'] = round(profit_loss, 2)
-                        trade['PnLPercent'] = round(profit_percent, 2)
-                        trade['Duration'] = duration_str
-                        trade['Result'] = result
-                        trade['ExitTime'] = trade_end_time.strftime('%Y-%m-%d %H:%M:%S')
-                        trade['ExitReason'] = "Stop Loss Triggered"
+                # 更新交易记录和全局 ACCOUNT_SIZE
+                global ACCOUNT_SIZE # Declare global to modify
+                
+                for trade_item in trades_record:
+                    # Match based on the unique trade entry key string and symbol
+                    if trade_item.get('Time') == trade_entry_key_str and trade_item.get('Symbol') == contract.symbol:
+                        trade_item['ExitPrice'] = round(exit_price, 2)
+                        trade_item['PnL'] = round(profit_loss, 2)
+                        trade_item['PnLPercent'] = round(profit_percent, 2)
+                        trade_item['Duration'] = duration_str
+                        trade_item['Result'] = result
+                        trade_item['ExitTime'] = trade_end_time.strftime('%Y-%m-%d %H:%M:%S')
+                        trade_item['ExitReason'] = "Stop Loss Triggered"
+                        
+                        acc_before_this_trade = trade_item.get('AccBefore')
+                        if pd.notna(acc_before_this_trade) and pd.notna(profit_loss):
+                            acc_after_this_trade = round(acc_before_this_trade + profit_loss, 2)
+                            trade_item['AccAfter'] = acc_after_this_trade
+                        else:
+                            trade_item['AccAfter'] = pd.NA
+                            logger.warning(f"Could not calculate AccAfter for trade {trade_entry_key_str}. AccBefore: {acc_before_this_trade}, PnL: {profit_loss}")
+                        
+                        # Update global ACCOUNT_SIZE
+                        if pd.notna(profit_loss):
+                            ACCOUNT_SIZE += profit_loss
+                            ACCOUNT_SIZE = round(ACCOUNT_SIZE, 2)
+                            logger.info(f"Global ACCOUNT_SIZE updated to: {ACCOUNT_SIZE:.2f} due to PnL: {profit_loss:.2f} (Stop Loss)")
+                        else:
+                            logger.warning(f"PnL is NA for trade {trade_entry_key_str}, ACCOUNT_SIZE not updated.")
                         break
                 
                 # 打印交易表格
@@ -1078,7 +1175,7 @@ def monitor_trade_and_exit(action, quantity, entry_price, stop_price, config_exi
         logger.error(traceback.format_exc())
 
 # 市价平仓
-def close_position_at_market(action, quantity, entry_price, start_time, determined_exit_reason):
+def close_position_at_market(action, quantity, entry_price, trade_entry_key_str, monitor_start_time, determined_exit_reason):
     """
     以市价平仓当前持仓
     
@@ -1086,7 +1183,8 @@ def close_position_at_market(action, quantity, entry_price, start_time, determin
         action: 原交易方向
         quantity: 数量
         entry_price: 入场价格
-        start_time: 交易开始时间
+        trade_entry_key_str: 交易记录的唯一时间标识符 (字符串)
+        monitor_start_time: monitor_trade_and_exit开始监控的时间 (datetime对象，用于计算持仓时间)
         determined_exit_reason: 调用者确定的平仓原因
     """
     try:
@@ -1147,7 +1245,8 @@ def close_position_at_market(action, quantity, entry_price, start_time, determin
             # 计算交易结果
             eastern_tz = pytz.timezone('US/Eastern')
             trade_end_time = datetime.now(eastern_tz)
-            duration_seconds = (trade_end_time - start_time).total_seconds()
+            # Duration calculated from when monitor_trade_and_exit started monitoring this active trade
+            duration_seconds = (trade_end_time - monitor_start_time).total_seconds() 
             hours, remainder = divmod(duration_seconds, 3600)
             minutes, seconds = divmod(remainder, 60)
             duration_str = f"{int(hours)}小时{int(minutes)}分钟{int(seconds)}秒"
@@ -1165,20 +1264,39 @@ def close_position_at_market(action, quantity, entry_price, start_time, determin
             # 简化日志输出
             logger.info(f"交易结束 | {action} {quantity} | 持仓时间: {duration_str} | 结果: {result}")
             
-            # 更新交易记录
-            for trade in trades_record:
-                if 'EntryPrice' in trade and abs(trade['EntryPrice'] - entry_price) < 0.1:
-                    trade['ExitPrice'] = exit_price
-                    trade['PnL'] = round(profit_loss, 2)
-                    trade['PnLPercent'] = round(profit_percent, 2)
-                    trade['Duration'] = duration_str
-                    trade['Result'] = result
-                    trade['ExitTime'] = trade_end_time.strftime('%Y-%m-%d %H:%M:%S')
-                    trade['ExitReason'] = determined_exit_reason # Use determined_exit_reason
+            # 更新交易记录和全局 ACCOUNT_SIZE
+            global ACCOUNT_SIZE # Declare global to modify
+
+            for trade_record_item in trades_record:
+                # Match based on the unique trade entry key string and symbol
+                if trade_record_item.get('Time') == trade_entry_key_str and trade_record_item.get('Symbol') == contract.symbol:
+                    trade_record_item['ExitPrice'] = round(exit_price,2)
+                    trade_record_item['PnL'] = round(profit_loss, 2)
+                    trade_record_item['PnLPercent'] = round(profit_percent, 2)
+                    trade_record_item['Duration'] = duration_str
+                    trade_record_item['Result'] = result
+                    trade_record_item['ExitTime'] = trade_end_time.strftime('%Y-%m-%d %H:%M:%S')
+                    trade_record_item['ExitReason'] = determined_exit_reason
+                    
+                    acc_before_this_trade = trade_record_item.get('AccBefore')
+                    if pd.notna(acc_before_this_trade) and pd.notna(profit_loss):
+                        acc_after_this_trade = round(acc_before_this_trade + profit_loss, 2)
+                        trade_record_item['AccAfter'] = acc_after_this_trade
+                    else:
+                        trade_record_item['AccAfter'] = pd.NA
+                        logger.warning(f"Could not calculate AccAfter for trade {trade_entry_key_str}. AccBefore: {acc_before_this_trade}, PnL: {profit_loss}")
+
+                    # Update global ACCOUNT_SIZE
+                    if pd.notna(profit_loss):
+                        ACCOUNT_SIZE += profit_loss
+                        ACCOUNT_SIZE = round(ACCOUNT_SIZE, 2)
+                        logger.info(f"Global ACCOUNT_SIZE updated to: {ACCOUNT_SIZE:.2f} due to PnL: {profit_loss:.2f} (Market Close)")
+                    else:
+                        logger.warning(f"PnL is NA for trade {trade_entry_key_str}, ACCOUNT_SIZE not updated.")
                     break
             
             # 打印交易表格
-            print_trade_table(action, entry_price, exit_price, quantity, profit_loss, profit_percent, duration_str, determined_exit_reason) # Use determined_exit_reason
+            print_trade_table(action, entry_price, exit_price, quantity, profit_loss, profit_percent, duration_str, determined_exit_reason)
             
             return True
         else:
@@ -1242,7 +1360,7 @@ try:
         ib.disconnect()
         exit(1)
 
-    R = ATR * 0.1
+    R = ATR * ATR_multiplier
     
     # 分析最新K线并生成交易信号
     price_change_percent = (latest_bar.close - latest_bar.open) / latest_bar.open * 100
@@ -1318,9 +1436,16 @@ try:
     
     # 执行交易
     logger.info("执行交易...")
-    fill_price, trade_time = place_trade(action, qty, stop_price_reference)
+
+    # Record ACCOUNT_SIZE before this specific trade
+    # This ACCOUNT_SIZE is the global one, iterated from previous trades (if any in this run)
+    acc_before_this_trade = round(ACCOUNT_SIZE, 2) 
+    logger.info(f"Account size before this trade (for AccBefore field): {acc_before_this_trade:.2f}")
     
-    if fill_price:
+    # trade_time is the actual fill time (datetime object)
+    fill_price, trade_time = place_trade(action, qty, stop_price_reference) 
+    
+    if fill_price and trade_time: # Ensure trade_time (fill time) is valid
         # 基于实际成交价格重新计算止损价格
         if action == 'BUY':
             stop_price = format_price(fill_price - R)
@@ -1356,29 +1481,36 @@ try:
         logger.info(f"3. 最终下单数量 = min(风险头寸, 杠杆头寸) = min({qty_risk}, {qty_leverage}) = {qty} 单位")
         logger.info("-"*50 + "\n")
         
+        # Use the actual fill time (trade_time) for the 'Time' field in trades_record
+        # This will serve as a unique key for this trade entry.
+        trade_entry_key_str = trade_time.strftime('%Y-%m-%d %H:%M:%S')
+
         trades_record.append({
-            'Time': trade_time.strftime('%Y-%m-%d %H:%M:%S'),
+            'Time': trade_entry_key_str, # Unique entry time key
             'Direction': action,
-            'EntryPrice': fill_price,
+            'EntryPrice': round(fill_price, 2),
             'Quantity': qty,
-            'StopLoss': stop_price,
-            'PnL': 0.0,
-            'PnLPercent': 0.0,
+            'StopLoss': round(stop_price, 2), # This is actual_stop_price
+            'PnL': pd.NA, 
+            'PnLPercent': pd.NA,
             'Symbol': contract.symbol,
-            'Duration': '',
-            'Result': '',
-            'ExitTime': '',
-            'ExitReason': '',
-            'ExitPrice': 0.0
+            'AccBefore': acc_before_this_trade, # Iterated ACCOUNT_SIZE before this trade
+            'AccAfter': pd.NA, # Will be (AccBefore + PnL for this trade)
+            'Duration': pd.NA,
+            'Result': pd.NA,
+            'ExitTime': pd.NA,
+            'ExitReason': pd.NA,
+            'ExitPrice': pd.NA
         })
         
         # 监控交易并处理平仓
         logger.info("开始监控交易...")
-        monitor_trade_and_exit(action, qty, fill_price, stop_price, trade_exit_strategy, trade_max_hold_duration_minutes)
+        # Pass the unique trade_entry_key_str to monitor_trade_and_exit
+        monitor_trade_and_exit(action, qty, fill_price, stop_price, trade_exit_strategy, trade_max_hold_duration_minutes, trade_entry_key_str)
         
-        # 交易结束后打印报告
-        print_daily_report()
-        print_trade_summary()
+        # 交易结束后打印报告 - Moved to finally block for robustness
+        # print_daily_report()
+        # print_trade_summary()
     else:
         logger.warning("交易执行失败")
     
@@ -1405,7 +1537,7 @@ finally:
     if trades_record:
         try:
             logger.info("打印最终交易报告...")
-            print_daily_report()
+            print_daily_report() # This will use global ACCOUNT_SIZE to update config
             print_trade_summary()
         except Exception as e:
             logger.error(f"打印交易报告时出错: {e}")
